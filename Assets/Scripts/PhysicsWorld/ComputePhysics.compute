@@ -1,0 +1,149 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel PhysicsCalc
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+
+/*struct physObj
+{
+    float3 position_current;
+    float3 position_prev;
+    float3 acceleration;
+    float3 force;
+    float radius;
+    bool isStatic;
+    uint gridIndex;
+};*/
+
+struct PhysObj
+{
+    float3 position;
+    float3 velocity;
+    float radius;
+    bool isStatic;
+    uint gridIndex;
+};
+
+float dt;
+float3 bounds;
+float3 center;
+float3 gravity;
+uint objectsCount;
+
+float3 explosionCenter;
+float explosionRadius;
+float explosionForce;
+bool applyExplosion;
+
+
+RWStructuredBuffer<PhysObj> physObjects;
+
+void ApplyBounds(inout PhysObj obj)
+{
+    float consumptionFactor = 0.5f;
+    
+    // Проверка и корректировка по X
+    if (obj.position.x < center.x - bounds.x)
+    {
+        obj.position.x = center.x - bounds.x;
+        obj.velocity.x *= -consumptionFactor;
+    }
+    else if (obj.position.x > center.x + bounds.x)
+    {
+        obj.position.x = center.x + bounds.x;
+        obj.velocity.x *= -consumptionFactor;
+    }
+
+    // Проверка и корректировка по Y
+    if (obj.position.y < center.y - bounds.y)
+    {
+        obj.position.y = center.y - bounds.y;
+        obj.velocity.y *= -consumptionFactor;
+    }
+    else if (obj.position.y > center.y + bounds.y)
+    {
+        obj.position.y = center.y + bounds.y;
+        obj.velocity.y *= -consumptionFactor;
+    }
+
+    // Проверка и корректировка по Z
+    if (obj.position.z < center.z - bounds.z)
+    {
+        obj.position.z = center.z - bounds.z;
+        obj.velocity.z *= -consumptionFactor;
+    }
+    else if (obj.position.z > center.z + bounds.z)
+    {
+        obj.position.z = center.z + bounds.z;
+        obj.velocity.z *= -consumptionFactor;
+    }
+}
+
+void ResolveCollision(inout PhysObj obj1, inout PhysObj obj2)
+{
+    float3 dir = obj1.position - obj2.position;
+    float dist = length(dir);
+
+    float radius = obj1.radius + obj2.radius;
+
+    if (dist < radius)
+    {
+        float3 normDir = normalize(dir);
+        float penetrationDepth = radius - dist;
+        float3 correction = normDir * (penetrationDepth / 2.0);
+
+        if (obj1.isStatic == false)
+        {
+            obj1.position += correction;
+            obj1.velocity -= normDir * dot(obj1.velocity, normDir);
+        }
+        
+        if (obj2.isStatic == false)
+        {
+            obj2.position -= correction;
+            obj2.velocity -= normDir * dot(obj2.velocity, normDir);
+        }
+    }
+}
+
+[numthreads(256, 1, 1)]
+void PhysicsCalc(uint3 id : SV_DispatchThreadID)
+{
+    uint index = id.x;
+
+    PhysObj physObj = physObjects[index];
+
+    if(physObj.isStatic) return;
+    
+    physObj.velocity += gravity * dt;
+    physObj.position += physObj.velocity * dt;
+
+
+    if (applyExplosion)
+    {
+        float3 dir = physObj.position - explosionCenter;
+        float dist = length(dir);
+        if (dist < explosionRadius)
+        {
+            dir = normalize(dir);
+            physObj.velocity += dir * explosionForce * (1.0f - dist / explosionRadius);
+        }
+    }
+    
+    ApplyBounds(physObj);
+    
+    for (uint i = 0; i < objectsCount; ++i)
+    {
+        if (i == index) continue;
+
+        PhysObj otherObj = physObjects[i];
+
+        if(otherObj.isStatic) continue;
+        
+        ResolveCollision(physObj, otherObj);
+        
+        physObjects[i] = otherObj;
+    }
+
+    physObjects[index] = physObj;
+}

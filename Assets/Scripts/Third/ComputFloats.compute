@@ -1,0 +1,18 @@
+#pragma kernel Move
+
+RWStructuredBuffer<float3> _data;
+
+
+
+[numthreads(256,1,1)]
+void Move (uint3 id : SV_DispatchThreadID)
+{
+    float3 data = _data[id.x];
+
+    for (int i = 0; i < 10; ++i)
+    {
+        data = float3(sqrt(data.x),sqrt(data.y),sqrt(data.z));
+    }
+
+    _data[id.x] = data;
+}

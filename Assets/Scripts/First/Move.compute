@@ -1,0 +1,48 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel Move
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+//RWTexture2D<float4> Result;
+
+RWStructuredBuffer<float> _forces;
+
+RWStructuredBuffer<float3> _positions;
+
+RWStructuredBuffer<float3> _directions;
+
+RWStructuredBuffer<float4x4> _matrices;
+
+float _deltaTime;
+float4 _bounds;
+
+[numthreads(256,1,1)]
+void Move (uint3 id : SV_DispatchThreadID)
+{
+    //float speed = 1f;
+    
+    float force = _forces[id.x];
+    float3 pos = _positions[id.x];
+    float3 direction = _directions[id.x];
+  
+   // float4x4 mat = _matrices[id.x];
+    
+    //float x = mat[id.x][id.x + 3];
+   // float y = mat[id.x + 1][id.x + 3];
+   // float z = mat[id.x + 2][id.x + 3];
+
+   // float3 pos = float3(x,y,z);
+    
+    pos += direction * (_deltaTime * force);
+    
+    if (pos.x > _bounds.x || pos.x < -_bounds.x || pos.y > _bounds.y || pos.y < -_bounds.y)
+    {
+        pos = 0;
+    }
+
+    //_matrices[id.x][id.x][id.x + 3] = pos.x;
+    //_matrices[id.x][id.x + 1][id.x + 3] = pos.y;
+    //_matrices[id.x][id.x + 2][id.x + 3] = pos.z;
+    
+    _positions[id.x] = pos;
+}
