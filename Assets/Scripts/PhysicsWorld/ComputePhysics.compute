@@ -1,22 +1,8 @@
-// Each #kernel tells which function to compile; you can have many kernels
 #pragma kernel PhysicsCalc
-
-// Create a RenderTexture with enableRandomWrite flag and set it
-// with cs.SetTexture
-
-/*struct physObj
-{
-    float3 position_current;
-    float3 position_prev;
-    float3 acceleration;
-    float3 force;
-    float radius;
-    bool isStatic;
-    uint gridIndex;
-};*/
 
 struct PhysObj
 {
+    float4x4 mat;
     float3 position;
     float3 velocity;
     float radius;
@@ -118,7 +104,6 @@ void PhysicsCalc(uint3 id : SV_DispatchThreadID)
     physObj.velocity += gravity * dt;
     physObj.position += physObj.velocity * dt;
 
-
     if (applyExplosion)
     {
         float3 dir = physObj.position - explosionCenter;
@@ -145,5 +130,14 @@ void PhysicsCalc(uint3 id : SV_DispatchThreadID)
         physObjects[i] = otherObj;
     }
 
+    float4x4 translation = float4x4(
+            1, 0, 0, physObj.position.x,
+            0, 1, 0, physObj.position.y,
+            0, 0, 1, physObj.position.z,
+            0, 0, 0, 1
+        );
+
+    physObj.mat = translation;
+    
     physObjects[index] = physObj;
 }

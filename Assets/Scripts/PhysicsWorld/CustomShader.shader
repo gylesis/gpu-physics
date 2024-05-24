@@ -1,76 +1,75 @@
-Shader "Unlit/CustomShader"
+Shader "Tarodev/CubeInstanced"
 {
     Properties
     {
-        _MainTex ("Texture", 2D) = "white" {}
+        _FarColor("Far color", Color) = (.2, .2, .2, 1)
     }
     SubShader
     {
-        Tags
-        {
-            "RenderType"="Opaque"
-        }
-        LOD 100
-
         Pass
         {
-            CGPROGRAM
+            Tags
+            {
+                "RenderType"="Opaque"
+                "RenderPipeline" = "UniversalRenderPipeline"
+            }
+
+            HLSLPROGRAM
             #pragma vertex vert
             #pragma fragment frag
-            // make fog work
-            #pragma multi_compile_fog
+            #pragma multi_compile_instancing
 
-            #include "UnityCG.cginc"
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Lighting.hlsl"
 
-            struct appdata
-            {
-                float4 vertex : POSITION;
-                float2 uv : TEXCOORD0;
-            };
+            float4 _FarColor;
 
             struct PhysObj
             {
                 float4x4 mat;
-                float3 position_prev;
-                float3 acceleration;
-                float3 force;
+                float3 position;
+                float3 velocity;
                 float radius;
                 bool isStatic;
+                uint gridIndex;
             };
 
-            struct v2f
+            StructuredBuffer<PhysObj> physObjects;
+
+            struct attributes
             {
+                float3 normal : NORMAL;
+                float4 vertex : POSITION;
                 float2 uv : TEXCOORD0;
-                UNITY_FOG_COORDS(1)
-                float4 vertex : SV_POSITION;
+                float4 color : COLOR;
             };
 
-            sampler2D _MainTex;
-            float4 _MainTex_ST;
-
-            StructuredBuffer<PhysObj> data;
-
-            v2f vert(appdata v, const uint instance_id: SV_InstanceID)
+            struct varyings
             {
-                v2f o;
+                float4 vertex : SV_POSITION;
+                float3 diffuse : TEXCOORD2;
+                float3 color : TEXCOORD3;
+            };
 
-                const float4 pos = mul(data[instance_id].mat, v.vertex);
+            varyings vert(attributes v, const uint instance_id : SV_InstanceID)
+            {
+                varyings o;
+
+                float4 pos = mul(physObjects[instance_id].mat, v.vertex);;
+
                 
-                o.vertex = UnityObjectToClipPos(pos);
-                o.uv = TRANSFORM_TEX(v.uv, _MainTex);
-                UNITY_TRANSFER_FOG(o, o.vertex);
+                o.vertex = mul(UNITY_MATRIX_VP, mul(unity_ObjectToWorld, pos));
+                o.diffuse = saturate(dot(v.normal, _MainLightPosition.xyz));
+                o.color = 1;
+
                 return o;
             }
 
-            fixed4 frag(v2f i) : SV_Target
+            half4 frag(const varyings i) : SV_Target
             {
-                // sample the texture
-                fixed4 col = tex2D(_MainTex, i.uv);
-                // apply fog
-                UNITY_APPLY_FOG(i.fogCoord, col);
-                return col;
+                const float3 lighting = i.diffuse * 1.7;
+                return half4(i.color * lighting, 1);;
             }
-            ENDCG
+            ENDHLSL
         }
     }
 }

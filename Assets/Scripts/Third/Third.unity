@@ -711,7 +711,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   _useGPU: 1
-  _material: {fileID: 2100000, guid: d94e8109ec5b1a64bae75faeb2fcb15d, type: 2}
+  _sphereMaterial: {fileID: 2100000, guid: d94e8109ec5b1a64bae75faeb2fcb15d, type: 2}
   _mesh: {fileID: 10207, guid: 0000000000000000e000000000000000, type: 0}
   _moveObjectPrefab: {fileID: 2758284255833404995, guid: 38cf7b645ed5105428215b1ec4546b82,
     type: 3}
@@ -720,9 +720,9 @@ MonoBehaviour:
   _gravityScale: 1
   _bounds: {fileID: 1351922161}
   _velocityConsumption: 10
-  _sphereRadius: 0.2
+  _sphereRadius: 0.1
   _forcePower: 5
-  _spheresCount: 256
+  _spheresCount: 26000
   _computeShader: {fileID: 7200000, guid: b2152d0f8625e5b45bd44654447327bc, type: 3}
   _explosionObject: {fileID: 925718388}
   _physicsSimulationDelta: 0.02

@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using Unity.Collections;
 using Unity.Mathematics;
 using UnityEngine;
+using UnityEngine.Profiling;
 using UnityEngine.Rendering;
 using UnityEngine.Serialization;
 using Random = UnityEngine.Random;
@@ -13,7 +14,7 @@ namespace PhysicsWorld
     {
         [SerializeField] private bool _useGPU;
 
-        [SerializeField] private Material _material;
+        [SerializeField] private Material _sphereMaterial;
         [SerializeField] private Mesh _mesh;
         private NativeArray<Matrix4x4> _matrices;
         private RenderParams _rp;
@@ -40,16 +41,15 @@ namespace PhysicsWorld
         [SerializeField] private float _physicsSimulationDelta = 0.005f;
 
 
-        private readonly uint[] _args = { 0, 0, 0, 0, 0 };
+        private uint[] _args = { 0, 0, 0, 0, 0 };
         private ComputeBuffer _argsBuffer;
 
-        private uint _threadGroupSizeX = 64;
+        private uint _threadGroupSizeX = 256;
         private uint _threadGroupSizeY = 1;
 
         private ComputeBuffer _spheresBuffer;
         private int _kernel;
         private SpherePhysObj[] _spherePhysObjects;
-        private List<SpherePhysObj> _spheresCopy;
         private AsyncGPUReadbackRequest _gpuRequest;
 
         bool _applyExplosion = false;
@@ -63,8 +63,7 @@ namespace PhysicsWorld
         private void Awake()
         {
             _matrices = new NativeArray<Matrix4x4>(_spheresCount, Allocator.Persistent);
-            _rp = new RenderParams(_material);
-            _spheresCopy = new List<SpherePhysObj>(_spheresCount);
+            _rp = new RenderParams(_sphereMaterial);
 
             if (_useGPU)
             {
@@ -81,7 +80,6 @@ namespace PhysicsWorld
             _kernel = _computeShader.FindKernel("PhysicsCalc");
 
             int objectSize = Marshal.SizeOf(typeof(SpherePhysObj));
-
             _spheresBuffer = new ComputeBuffer(_spheresCount, objectSize);
 
             _computeShader.SetVector("center", _bounds.bounds.center);
@@ -94,11 +92,9 @@ namespace PhysicsWorld
             for (int i = 0; i < _spheresCount; i++)
             {
                 Vector3 spawnPos = _bounds.center + Random.insideUnitSphere * 2;
-                //MoveObject moveObject = Instantiate(_moveObjectPrefab, spawnPos, Quaternion.identity);
 
                 _matrices[i] = Matrix4x4.TRS(spawnPos, Quaternion.identity, Vector3.one * (_sphereRadius * 2));
 
-                // _moveObjects.Add(moveObject);
                 SpherePhysObj physObj = new SpherePhysObj();
 
                 physObj.position = spawnPos;
@@ -109,17 +105,24 @@ namespace PhysicsWorld
                 physObj.isStatic = 0;
                 physObj.radius = _sphereRadius;
                 physObj.gridIndex = 0;
+                physObj.mat = _matrices[i];
 
                 _spherePhysObjects[i] = physObj;
-                _spheresCopy.Add(physObj);
             }
 
+            _args[0] = _mesh.GetIndexCount(0);
+            _args[1] = (uint)_spheresCount;
+            _args[2] = _mesh.GetIndexStart(0);
+            _args[3] = _mesh.GetBaseVertex(0);
+            
+            _argsBuffer = new ComputeBuffer(1, _args.Length * sizeof(uint), ComputeBufferType.IndirectArguments);
+            _argsBuffer.SetData(_args);
+            
             _spheresBuffer.SetData(_spherePhysObjects);
             _computeShader.SetBuffer(_kernel, "physObjects", _spheresBuffer);
-
-            int dispatchGroup = (int)(_spheresCount / _threadGroupSizeX);
-
-            _computeShader.Dispatch(_kernel, dispatchGroup, 1, 1);
+            _sphereMaterial.SetBuffer("physObjects", _spheresBuffer);
+            
+            DispatchShader();
         }
 
         private void SetupCPU()
@@ -221,7 +224,9 @@ namespace PhysicsWorld
         {
             if (_useGPU)
             {
-                for (var i = 0; i < _spherePhysObjects.Length; i++)
+                Profiler.BeginSample("Read matrices");
+              
+                /*for (var i = 0; i < _spherePhysObjects.Length; i++)
                 {
                     SpherePhysObj physObj = _spherePhysObjects[i];
 
@@ -235,8 +240,10 @@ namespace PhysicsWorld
                     mat.m23 = physObj.position.z;
 
                     _matrices[i] = mat;
-                }
+                }*/
 
+                Profiler.EndSample();
+                
                 if (_applyExplosion)
                 {
                     _applyExplosion = false;
@@ -273,19 +280,7 @@ namespace PhysicsWorld
 
                     _matrices[i] = mat;
                 }
-
-
-                /*if (Input.GetMouseButtonDown(0))
-                {
-                    Vector3 direction = Random.insideUnitSphere;
-                    if (direction.y < 0)
-                    {
-                        direction.y = -direction.y;
-                    }
-
-                    //_physicsObjects[Random.Range(0, _physicsObjects.Count)].Rigidbody.Force += direction * _forcePower;
-                }
-                */
+               
             }
 
             UpdateMesh();
@@ -298,8 +293,10 @@ namespace PhysicsWorld
                 _computeShader.SetFloat("dt", _physicsSimulationDelta);
 
                 DispatchShader();
-
-                _spheresBuffer.GetData(_spherePhysObjects);
+                
+                Profiler.BeginSample("Read data from buffer");
+               // _spheresBuffer.GetData(_spherePhysObjects);
+                Profiler.EndSample();
             }
             else
             {
@@ -312,6 +309,12 @@ namespace PhysicsWorld
         {
             int dispatchGroup = Mathf.CeilToInt((int)(_spheresCount / _threadGroupSizeX));
             _computeShader.Dispatch(_kernel, dispatchGroup, 1, 1);
+        }
+
+        private void UpdateMesh()
+        {
+            //Graphics.RenderMeshInstanced(_rp, _mesh, 0, _matrices);
+            Graphics.DrawMeshInstancedIndirect(_mesh, 0, _sphereMaterial, _bounds.bounds, _argsBuffer);
         }
 
         private void ResolveCollisions()
@@ -368,15 +371,11 @@ namespace PhysicsWorld
             }
         }
 
-        private void UpdateMesh()
-        {
-            Graphics.RenderMeshInstanced(_rp, _mesh, 0, _matrices);
-        }
-
         private void OnDestroy()
         {
             _spheresBuffer?.Dispose();
             _matrices.Dispose();
+            _argsBuffer.Release();
         }
     }
 
@@ -400,6 +399,7 @@ namespace PhysicsWorld
 
     internal struct SpherePhysObj
     {
+        public float4x4 mat;
         public float3 position;
         public float3 velocity;
         public float radius;
