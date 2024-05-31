@@ -26,11 +26,11 @@ Shader "Tarodev/CubeInstanced"
             struct PhysObj
             {
                 float4x4 mat;
-                float3 position;
+                /*float3 position;
                 float3 velocity;
                 float radius;
                 bool isStatic;
-                uint gridIndex;
+                uint gridIndex;*/
             };
 
             StructuredBuffer<PhysObj> physObjects;

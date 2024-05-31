@@ -2,12 +2,9 @@
 
 struct PhysObj
 {
-    float4x4 mat;
     float3 position;
     float3 velocity;
-    float radius;
     bool isStatic;
-    uint gridIndex;
 };
 
 float dt;
@@ -15,19 +12,55 @@ float3 bounds;
 float3 center;
 float3 gravity;
 uint objectsCount;
+float sphereRadius;
 
 float3 explosionCenter;
-float explosionRadius;
-float explosionForce;
 bool applyExplosion;
 
+float explosionForce;
+float explosionRadius;
+float3 rocketPosition;
+float rocketDetectRadius;
 
+RWStructuredBuffer<uint> rocketArgs;
 RWStructuredBuffer<PhysObj> physObjects;
+
+void ApplyExplosion(inout PhysObj obj, float3 explCenter, float explRadius)
+{
+    float3 dir = obj.position - explCenter;
+    float dist = length(dir);
+
+    if (dist < explRadius)
+    {
+        obj.isStatic = false;
+
+        dir = normalize(dir);
+        obj.velocity += dir * explosionForce * (1.0f - dist / explosionRadius);
+    }
+}
+
+void ResolveRocketExplosion(inout PhysObj obj)
+{
+    if(obj.isStatic == false) return;
+    
+    if (rocketArgs[0] != 1) return;
+
+    float3 dir = obj.position - rocketPosition;
+    float dist = length(dir);
+
+    if (dist < rocketDetectRadius)
+    {
+        obj.isStatic = false;
+        
+        dir = normalize(dir);
+        obj.velocity += dir * explosionForce * (1.0f - dist / explosionRadius);
+    }
+}
 
 void ApplyBounds(inout PhysObj obj)
 {
     float consumptionFactor = 0.5f;
-    
+
     // Проверка и корректировка по X
     if (obj.position.x < center.x - bounds.x)
     {
@@ -65,12 +98,21 @@ void ApplyBounds(inout PhysObj obj)
     }
 }
 
+void Move(inout PhysObj physObj)
+{
+    if (physObj.isStatic == false)
+    {
+        physObj.velocity += gravity * dt;
+        physObj.position += physObj.velocity * dt;
+    }
+}
+
 void ResolveCollision(inout PhysObj obj1, inout PhysObj obj2)
 {
     float3 dir = obj1.position - obj2.position;
     float dist = length(dir);
 
-    float radius = obj1.radius + obj2.radius;
+    float radius = sphereRadius + sphereRadius;
 
     if (dist < radius)
     {
@@ -83,7 +125,7 @@ void ResolveCollision(inout PhysObj obj1, inout PhysObj obj2)
             obj1.position += correction;
             obj1.velocity -= normDir * dot(obj1.velocity, normDir);
         }
-        
+
         if (obj2.isStatic == false)
         {
             obj2.position -= correction;
@@ -92,52 +134,36 @@ void ResolveCollision(inout PhysObj obj1, inout PhysObj obj2)
     }
 }
 
-[numthreads(256, 1, 1)]
-void PhysicsCalc(uint3 id : SV_DispatchThreadID)
+void CheckForCollisions(uint index, PhysObj physObj)
 {
-    uint index = id.x;
-
-    PhysObj physObj = physObjects[index];
-
-    if(physObj.isStatic) return;
-    
-    physObj.velocity += gravity * dt;
-    physObj.position += physObj.velocity * dt;
-
-    if (applyExplosion)
-    {
-        float3 dir = physObj.position - explosionCenter;
-        float dist = length(dir);
-        if (dist < explosionRadius)
-        {
-            dir = normalize(dir);
-            physObj.velocity += dir * explosionForce * (1.0f - dist / explosionRadius);
-        }
-    }
-    
-    ApplyBounds(physObj);
-    
     for (uint i = 0; i < objectsCount; ++i)
     {
         if (i == index) continue;
 
         PhysObj otherObj = physObjects[i];
 
-        if(otherObj.isStatic) continue;
-        
+        if (otherObj.isStatic) continue;
+
         ResolveCollision(physObj, otherObj);
-        
+
         physObjects[i] = otherObj;
     }
+}
 
-    float4x4 translation = float4x4(
-            1, 0, 0, physObj.position.x,
-            0, 1, 0, physObj.position.y,
-            0, 0, 1, physObj.position.z,
-            0, 0, 0, 1
-        );
+[numthreads(256, 1, 1)]
+void PhysicsCalc(uint3 id : SV_DispatchThreadID)
+{
+    uint index = id.x;
 
-    physObj.mat = translation;
+    if (index >= objectsCount)
+        return;
+
+    PhysObj physObj = physObjects[index];
     
+    Move(physObj);
+    ApplyBounds(physObj);
+    CheckForCollisions(index, physObj);
+    ResolveRocketExplosion(physObj);
+
     physObjects[index] = physObj;
 }
