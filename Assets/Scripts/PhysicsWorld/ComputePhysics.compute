@@ -134,7 +134,7 @@ void ResolveCollision(inout PhysObj obj1, inout PhysObj obj2)
     }
 }
 
-void CheckForCollisions(uint index, PhysObj physObj)
+void CheckForCollisions(uint index, inout PhysObj physObj)
 {
     for (uint i = 0; i < objectsCount; ++i)
     {
@@ -146,11 +146,12 @@ void CheckForCollisions(uint index, PhysObj physObj)
 
         ResolveCollision(physObj, otherObj);
 
+       // physObjects[index] = physObj;
         physObjects[i] = otherObj;
     }
 }
 
-[numthreads(256, 1, 1)]
+[numthreads(512, 1, 1)]
 void PhysicsCalc(uint3 id : SV_DispatchThreadID)
 {
     uint index = id.x;

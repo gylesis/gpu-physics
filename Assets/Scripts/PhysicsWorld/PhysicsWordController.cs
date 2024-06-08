@@ -1,13 +1,10 @@
 ﻿using System;
-using System.Collections.Generic;
 using System.Runtime.InteropServices;
-using System.Threading.Tasks;
 using Unity.Collections;
 using Unity.Jobs;
 using Unity.Mathematics;
 using UnityEngine;
 using UnityEngine.Profiling;
-using UnityEngine.Rendering;
 using Random = UnityEngine.Random;
 
 namespace PhysicsWorld
@@ -20,7 +17,8 @@ namespace PhysicsWorld
         [SerializeField] private float _meshVertsOffest = 2;
 
         [SerializeField] private bool _useGPU;
-
+        [SerializeField] private bool _useCPUMultithreading;
+    
         [SerializeField] private Material _sphereMaterial;
         [SerializeField] private Mesh _mesh;
 
@@ -35,16 +33,19 @@ namespace PhysicsWorld
         [SerializeField] private float _forcePower = 5;
         [SerializeField] private float _rocketDetectRadius = 2;
 
+        float3 _explosionCenter;
 
         public bool IsRocketExploded { get; private set; }
 
+        public event Action RestartGame;
 
         private NativeArray<Matrix4x4> _matrices;
         private RenderParams _rp;
 
         public GPUSpherePhysObj[] GPUSpherePhysObjects => _GPUSpherePhysObjects;
+        public NativeArray<CPUSpherePhysObj> CPUPhysicsObjects => _CPUPhysicsObjects;
 
-
+        public bool UseGPU => _useGPU;
         public float ExplosionRadius => _explosionRadius;
         public float3 BoundsCenter => _bounds.center;
         public float3 Bounds => _bounds.bounds.extents;
@@ -52,20 +53,14 @@ namespace PhysicsWorld
 
         [Header("CPU")] [SerializeField] private int _spheresCount = 100;
 
-        private CPUSpherePhysObj[] _CPUPhysicsObjects;
+        private NativeArray<CPUSpherePhysObj> _CPUPhysicsObjects;
 
         [Header("GPU")] [SerializeField] private ComputeShader _computeShader;
-
-        private uint _threadGroupSizeX = 256;
-        private uint _threadGroupSizeY = 1;
 
         private uint[] _rocketArgs = new uint[]
         {
             0, // rocket state
-            0, //
-            0,
         };
-
 
         private ComputeBuffer _spheresBuffer;
         private ComputeBuffer _rocketArgsBuffer;
@@ -74,7 +69,6 @@ namespace PhysicsWorld
         private GPUSpherePhysObj[] _GPUSpherePhysObjects;
 
         bool _applyExplosion = false;
-        float3 _explosionCenter;
 
         [SerializeField] private float _explosionForcePower = 40;
         [SerializeField] private float _explosionRadius = 5;
@@ -83,16 +77,20 @@ namespace PhysicsWorld
         private Vector3[] _meshVertices;
         private SphereJob _sphereJob;
         private Action _onRocketExploded;
-        private Vector3 _rocketPos;
+        private float3 _rocketPos;
+        private JobHandle _jobHandle;
 
+        private uint _threadGroupSizeX = 512;
+        private uint _threadGroupSizeY = 1;
+        
         private void Awake()
         {
             _meshVertices = _drawnMesh.vertices;
             _spheresCount = _meshVertices.Length;
 
-            _matrices = new NativeArray<Matrix4x4>(_drawnMesh.vertices.Length, Allocator.Persistent);
+            _matrices = new NativeArray<Matrix4x4>(_spheresCount, Allocator.Persistent);
             _rp = new RenderParams(_sphereMaterial);
-
+            
             if (_useGPU)
             {
                 SetupGPU();
@@ -101,12 +99,16 @@ namespace PhysicsWorld
             {
                 SetupCPU();
             }
+            
+            RestartGame?.Invoke();
         }
 
         private void SetupCPU()
         {
-            _CPUPhysicsObjects = new CPUSpherePhysObj[_spheresCount];
+            _CPUPhysicsObjects = new NativeArray<CPUSpherePhysObj>(_spheresCount, Allocator.Persistent);
 
+             _sphereJob = new SphereJob();
+            
             for (int i = 0; i < _spheresCount; i++)
             {
                 Vector3 spawnPos = _meshVertices[i] * _meshVertsOffest;
@@ -124,21 +126,19 @@ namespace PhysicsWorld
 
                 _CPUPhysicsObjects[i] = physObj;
             }
-
-            _sphereJob = new SphereJob();
-
-            _sphereJob.bounds = Bounds;
-            _sphereJob.center = BoundsCenter;
-            _sphereJob.gravity = TotalGravity;
-
-            _sphereJob.sphereRadius = _sphereRadius;
-
-            _sphereJob.InputPhysObjects = new NativeArray<CPUSpherePhysObj>(_CPUPhysicsObjects, Allocator.Persistent);
-            _sphereJob.OutputPhysObjects = new NativeArray<CPUSpherePhysObj>(_CPUPhysicsObjects, Allocator.Persistent);
+            
+            if (_useCPUMultithreading)
+            {
+                _sphereJob.bounds = Bounds;
+                _sphereJob.center = BoundsCenter;
+                _sphereJob.gravity = TotalGravity;
+                _sphereJob.sphereRadius = _sphereRadius;
+                _sphereJob.InputPhysObjects = new NativeArray<CPUSpherePhysObj>(_CPUPhysicsObjects, Allocator.Persistent);
+            }
         }
 
         private void SetupGPU(bool init = true)
-        {   
+        {
             _kernel = _computeShader.FindKernel("PhysicsCalc");
 
             if (init)
@@ -162,7 +162,7 @@ namespace PhysicsWorld
 
                 _GPUSpherePhysObjects[i] = physObj;
             }
-           
+
             UpdateShader();
             DispatchShader();
         }
@@ -171,7 +171,7 @@ namespace PhysicsWorld
         {
             _spheresBuffer?.Dispose();
             _rocketArgsBuffer?.Dispose();
-            
+
             int objectSize = Marshal.SizeOf(typeof(GPUSpherePhysObj));
             _spheresBuffer = new ComputeBuffer(_spheresCount, objectSize);
             _rocketArgsBuffer = new ComputeBuffer(_rocketArgs.Length, Marshal.SizeOf(typeof(uint)));
@@ -194,10 +194,106 @@ namespace PhysicsWorld
         }
 
         public void RebuildModel()
-        {
-            SetupGPU(false);
+        {   
+            RestartGame?.Invoke();
+            SetupGPU(false);        
         }
-        
+
+        private void Update()
+        {
+            if (_useGPU)
+            {
+                Profiler.BeginSample("Read matrices");
+
+                for (var i = 0; i < _GPUSpherePhysObjects.Length; i++)
+                {
+                    GPUSpherePhysObj physObj = _GPUSpherePhysObjects[i];
+
+                    if (float.IsNaN(physObj.position.x) || float.IsNaN(physObj.position.y) ||
+                        float.IsNaN(physObj.position.z)) continue;
+
+                    Matrix4x4 mat = _matrices[i];
+
+                    mat.m03 = physObj.position.x;
+                    mat.m13 = physObj.position.y;
+                    mat.m23 = physObj.position.z;
+
+                    _matrices[i] = mat;
+                }
+
+                Profiler.EndSample();
+            }
+            else
+            {
+                Profiler.BeginSample("Read matrices");
+
+                if (_useCPUMultithreading)
+                {
+                    if (_jobHandle.IsCompleted)
+                    {
+                        _CPUPhysicsObjects = _sphereJob.InputPhysObjects;
+                    }
+                }
+                
+                
+                for (var i = 0; i < _CPUPhysicsObjects.Length; i++)
+                {
+                    CPUSpherePhysObj cpuSpherePhysObj = _CPUPhysicsObjects[i];
+
+                    Matrix4x4 mat = _matrices[i];
+
+                    if (float.IsNaN(cpuSpherePhysObj.Position.x) 
+                        || float.IsNaN(cpuSpherePhysObj.Position.y)
+                        || float.IsNaN(cpuSpherePhysObj.Position.z) )
+                    {
+                        continue;
+                    }
+                        
+                    mat.m03 = cpuSpherePhysObj.Position.x;
+                    mat.m13 = cpuSpherePhysObj.Position.y;
+                    mat.m23 = cpuSpherePhysObj.Position.z;
+
+                    _matrices[i] = mat;
+                }
+                
+
+                Profiler.EndSample();
+            }
+
+            UpdateMesh();
+        }
+
+        private void FixedUpdate()
+        {
+            if (_useGPU)
+            {
+                _computeShader.SetFloat("dt", _physicsSimulationDelta);
+                _computeShader.SetVector("rocketPosition", new Vector4(_rocketPos.x,_rocketPos.y,_rocketPos.z,0));
+
+                DispatchShader();
+
+                _spheresBuffer.GetData(_GPUSpherePhysObjects);
+                _rocketArgsBuffer.GetData(_rocketArgs);
+
+                CheckRocketArgs();
+            }
+            else
+            {
+                if (_useCPUMultithreading)
+                {
+                    _sphereJob.dt = _physicsSimulationDelta;
+                    _sphereJob.rocketPosition = _rocketPos;
+                    _sphereJob.rocketDetectRadius = _rocketDetectRadius;
+                    _jobHandle = _sphereJob.Schedule(_spheresCount,  256);
+                    _jobHandle.Complete();
+                }
+                else
+                {
+                    MoveObjects(_physicsSimulationDelta);
+                }
+            }
+        }
+
         private void MoveObjects(float dt)
         {
             for (var i = 0; i < _CPUPhysicsObjects.Length; i++)
@@ -210,10 +306,25 @@ namespace PhysicsWorld
                     physObj.Position += physObj.Velocity * dt;
                 }
 
-                ApplyConstraints(physObj);
+                ApplyConstraints(ref physObj);
+
+                for (int j = 0; j < _CPUPhysicsObjects.Length; j++)
+                {
+                    if (i == j) continue;
+
+                    CPUSpherePhysObj otherPhysObj = _CPUPhysicsObjects[j];
+
+                    if (otherPhysObj.IsStatic) continue;
+
+                    Resolve(ref physObj, ref otherPhysObj);
+                }
+                
+                CheckForExplosion(ref physObj);
+                
+                _CPUPhysicsObjects[i] = physObj;
             }
 
-            void ApplyConstraints(CPUSpherePhysObj physicsObject)
+            void ApplyConstraints(ref CPUSpherePhysObj physicsObject)
             {
                 float consumptionFactor = _collisionVelocityConsumptionFactor;
 
@@ -252,86 +363,6 @@ namespace PhysicsWorld
                     physicsObject.Position.z = BoundsCenter.z + Bounds.z;
                     physicsObject.Velocity.z *= -consumptionFactor;
                 }
-            }
-        }
-
-        private void Update()
-        {
-            if (_useGPU)
-            {
-                Profiler.BeginSample("Read matrices");
-
-                for (var i = 0; i < _GPUSpherePhysObjects.Length; i++)
-                {
-                    GPUSpherePhysObj physObj = _GPUSpherePhysObjects[i];
-
-                    if (float.IsNaN(physObj.position.x) || float.IsNaN(physObj.position.y) ||
-                        float.IsNaN(physObj.position.z)) continue;
-
-                    Matrix4x4 mat = _matrices[i];
-
-                    mat.m03 = physObj.position.x;
-                    mat.m13 = physObj.position.y;
-                    mat.m23 = physObj.position.z;
-
-                    _matrices[i] = mat;
-                }
-
-                Profiler.EndSample();
-            }
-            else
-            {
-                Profiler.BeginSample("Read matrices");
-
-                for (var i = 0; i < _CPUPhysicsObjects.Length; i++)
-                {
-                    CPUSpherePhysObj cpuSpherePhysObj = _CPUPhysicsObjects[i];
-
-                    Matrix4x4 mat = _matrices[i];
-
-                    mat.m03 = cpuSpherePhysObj.Position.x;
-                    mat.m13 = cpuSpherePhysObj.Position.y;
-                    mat.m23 = cpuSpherePhysObj.Position.z;
-
-                    _matrices[i] = mat;
-                }
-
-                Profiler.EndSample();
-            }
-
-            UpdateMesh();
-        }
-
-        private void FixedUpdate()
-        {
-            if (_useGPU)
-            {
-                _computeShader.SetFloat("dt", _physicsSimulationDelta);
-                _computeShader.SetVector("rocketPosition", _rocketPos);
-
-                DispatchShader();
-
-                _spheresBuffer.GetData(_GPUSpherePhysObjects);
-                _rocketArgsBuffer.GetData(_rocketArgs);
-
-                CheckRocketArgs();
-            }
-            else
-            {
-                _sphereJob.dt = _physicsSimulationDelta;
-
-                JobHandle jobHandle = _sphereJob.Schedule(_spheresCount, 256);
-
-                jobHandle.Complete();
-
-                for (int i = 0; i < _sphereJob.OutputPhysObjects.Length; i++)
-                {
-                    _sphereJob.InputPhysObjects[i] = _sphereJob.OutputPhysObjects[i];
-                }
-
-
-                // MoveObjects(_physicsSimulationDelta);
-                // ResolveCollisions();
             }
         }
 
@@ -374,7 +405,11 @@ namespace PhysicsWorld
             _onRocketExploded = onRocketExploded;
 
             _rocketArgs[0] = 1;
-            _rocketArgsBuffer.SetData(_rocketArgs);
+
+            if (_useGPU)
+            {
+                _rocketArgsBuffer.SetData(_rocketArgs);
+            }
         }
 
         public void SetRocketPos(Vector3 rocketPos)
@@ -384,18 +419,17 @@ namespace PhysicsWorld
 
         private void CheckForExplosion(ref CPUSpherePhysObj physObj)
         {
-            if (_applyExplosion)
+            if(physObj.IsStatic == false) return;
+    
+            float3 dir = physObj.Position - _rocketPos;
+            float dist = math.length(dir);
+
+            if (dist < _rocketDetectRadius)
             {
-                float3 dir = physObj.Position - _explosionCenter;
-                float dist = math.length(dir);
+                physObj.IsStatic = false;
 
-                if (dist < _explosionRadius)
-                {
-                    physObj.IsStatic = false;
-
-                    dir = math.normalize(dir);
-                    physObj.Velocity += dir * _explosionForcePower * (1.0f - dist / _explosionRadius);
-                }
+                dir =  math.normalize(dir);
+                physObj.Velocity += dir * _explosionForcePower * (1.0f - dist / _explosionRadius);
             }
         }
 
@@ -410,26 +444,7 @@ namespace PhysicsWorld
             Graphics.RenderMeshInstanced(_rp, _mesh, 0, _matrices);
         }
 
-        private void ResolveCollisions()
-        {
-            for (var i = 0; i < _CPUPhysicsObjects.Length; i++)
-            {
-                CPUSpherePhysObj firstPhysObj = _CPUPhysicsObjects[i];
-
-                for (int j = 0; j < _CPUPhysicsObjects.Length; j++)
-                {
-                    if (i == j) continue;
-
-                    CPUSpherePhysObj otherPhysObj = _CPUPhysicsObjects[j];
-
-                    if (otherPhysObj.IsStatic) continue;
-
-                    Resolve(firstPhysObj, otherPhysObj);
-                }
-            }
-        }
-
-        private void Resolve(CPUSpherePhysObj firstPhysObj, CPUSpherePhysObj secondPhysObj)
+        private void Resolve(ref CPUSpherePhysObj firstPhysObj, ref CPUSpherePhysObj secondPhysObj)
         {
             Vector3 dir = firstPhysObj.Position - secondPhysObj.Position;
             float dist = dir.magnitude;
@@ -461,6 +476,7 @@ namespace PhysicsWorld
             _spheresBuffer?.Dispose();
             _matrices.Dispose();
             _rocketArgsBuffer?.Dispose();
+            _CPUPhysicsObjects.Dispose();
         }
     }
 
@@ -476,142 +492,5 @@ namespace PhysicsWorld
         public float3 position;
         public float3 velocity;
         public uint isStatic;
-    }
-
-    public struct SphereJob : IJobParallelFor
-    {
-        [ReadOnly] public NativeArray<CPUSpherePhysObj> InputPhysObjects;
-        public NativeArray<CPUSpherePhysObj> OutputPhysObjects;
-
-        public float dt;
-        public float3 bounds;
-        public float3 center;
-        public float3 gravity;
-        public float sphereRadius;
-
-        public float3 explosionCenter;
-        public float explosionRadius;
-        public float explosionForce;
-        public bool applyExplosion;
-
-        public void Execute(int i)
-        {
-            CPUSpherePhysObj firstPhysObj = InputPhysObjects[i];
-
-            Move(ref firstPhysObj);
-
-            ApplyBounds(ref firstPhysObj);
-
-            for (int j = 0; j < InputPhysObjects.Length; j++)
-            {
-                if (i == j) continue;
-
-                CPUSpherePhysObj otherPhysObj = InputPhysObjects[j];
-
-                if (otherPhysObj.IsStatic) continue;
-
-                ResolveCollisions(ref firstPhysObj, ref otherPhysObj);
-
-                OutputPhysObjects[j] = firstPhysObj;
-            }
-
-            CheckForExplosion(ref firstPhysObj);
-
-            OutputPhysObjects[i] = firstPhysObj;
-        }
-
-        private void Move(ref CPUSpherePhysObj physObj)
-        {
-            if (physObj.IsStatic == false)
-            {
-                physObj.Velocity += gravity * dt;
-                physObj.Position += physObj.Velocity * dt;
-            }
-        }
-
-        void ApplyBounds(ref CPUSpherePhysObj obj)
-        {
-            float consumptionFactor = 0.5f;
-
-            // Проверка и корректировка по X
-            if (obj.Position.x < center.x - bounds.x)
-            {
-                obj.Position.x = center.x - bounds.x;
-                obj.Velocity.x *= -consumptionFactor;
-            }
-            else if (obj.Position.x > center.x + bounds.x)
-            {
-                obj.Position.x = center.x + bounds.x;
-                obj.Velocity.x *= -consumptionFactor;
-            }
-
-            // Проверка и корректировка по Y
-            if (obj.Position.y < center.y - bounds.y)
-            {
-                obj.Position.y = center.y - bounds.y;
-                obj.Velocity.y *= -consumptionFactor;
-            }
-            else if (obj.Position.y > center.y + bounds.y)
-            {
-                obj.Position.y = center.y + bounds.y;
-                obj.Velocity.y *= -consumptionFactor;
-            }
-
-            // Проверка и корректировка по Z
-            if (obj.Position.z < center.z - bounds.z)
-            {
-                obj.Position.z = center.z - bounds.z;
-                obj.Velocity.z *= -consumptionFactor;
-            }
-            else if (obj.Position.z > center.z + bounds.z)
-            {
-                obj.Position.z = center.z + bounds.z;
-                obj.Velocity.z *= -consumptionFactor;
-            }
-        }
-
-        private void ResolveCollisions(ref CPUSpherePhysObj firstPhysObj, ref CPUSpherePhysObj secondPhysObj)
-        {
-            Vector3 dir = firstPhysObj.Position - secondPhysObj.Position;
-            float dist = dir.magnitude;
-
-            float radius = sphereRadius + sphereRadius;
-
-            if (dist < radius)
-            {
-                float3 normDir = dir.normalized;
-                float penetrationDepth = radius - dist;
-                float3 correction = normDir * (penetrationDepth / 2f);
-
-                if (firstPhysObj.IsStatic == false)
-                {
-                    firstPhysObj.Position += correction;
-                    firstPhysObj.Velocity -= normDir * math.dot(firstPhysObj.Velocity, normDir);
-                }
-
-                if (secondPhysObj.IsStatic == false)
-                {
-                    secondPhysObj.Position -= correction;
-                    secondPhysObj.Velocity -= normDir * math.dot(secondPhysObj.Velocity, normDir);
-                }
-            }
-        }
-
-        private void CheckForExplosion(ref CPUSpherePhysObj physObj)
-        {
-            if (applyExplosion)
-            {
-                float3 dir = physObj.Position - explosionCenter;
-                float dist = math.length(dir);
-
-                if (dist < explosionRadius)
-                {
-                    physObj.IsStatic = false;
-
-                    dir = math.normalize(dir);
-                    physObj.Velocity += dir * explosionForce * (1.0f - dist / explosionRadius);
-                }
-            }
-        }
     }
 }

@@ -41,7 +41,7 @@ namespace DefaultNamespace
                 fontStyle = FontStyle.Normal,
             };
 
-            GUI.Label(new Rect(50,50,100,100), text, guiStyle);
+            GUI.Label(new Rect(50,100,100,100), text, guiStyle);
         }
     }
 }

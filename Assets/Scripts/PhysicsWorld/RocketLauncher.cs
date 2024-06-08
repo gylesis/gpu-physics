@@ -48,7 +48,6 @@ namespace PhysicsWorld
                     return;
                 }
                 
-                
                 _rocket.transform.position += _direction * (Time.deltaTime * _rocketSpeed);
 
                 //RocketPos = _rocket.transform.position;

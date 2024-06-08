@@ -12,6 +12,10 @@ namespace PhysicsWorld
         private RocketLauncher _rocketLauncher;
         private PhysicsWordController _physicsWordController;
 
+        public float Progress { get; private set; }
+
+        public Action<float> ProgressEvaluated;
+        
         private void Awake()
         {
             _rocketLauncher = FindObjectOfType<RocketLauncher>();
@@ -27,12 +31,25 @@ namespace PhysicsWorld
 
         private void OnRocketExploded()
         {
-            int notStaticObjects = _physicsWordController.GPUSpherePhysObjects.Count(x => x.isStatic == 0);
-            int totalObjects = _physicsWordController.GPUSpherePhysObjects.Length;
+            int notStaticObjects;
+            int totalObjects;
+            
+            if (_physicsWordController.UseGPU)
+            {
+               notStaticObjects = _physicsWordController.GPUSpherePhysObjects.Count(x => x.isStatic == 0);
+               totalObjects = _physicsWordController.GPUSpherePhysObjects.Length;
+            }
+            else
+            {
+               notStaticObjects = _physicsWordController.CPUPhysicsObjects.Count(x => x.IsStatic == false);
+               totalObjects = _physicsWordController.CPUPhysicsObjects.Length;
+            }
 
             float progress = (float) notStaticObjects / totalObjects;
 
             _progress.fillAmount = progress;
+            Progress = progress;
+            ProgressEvaluated?.Invoke(progress);
         }
     }
 }
